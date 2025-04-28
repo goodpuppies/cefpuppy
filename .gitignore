@@ -1,0 +1,10 @@
+/target
+**/DawnCache
+**/GPUCache
+build
+.flatpak-builder
+cargo-sources.json
+
+Cargo.lock
+
+/.vscode/
