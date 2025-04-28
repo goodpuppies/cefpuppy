@@ -49,7 +49,11 @@ $env:PATH = "$env:PATH;$CefBinDir"
 Write-Host "Temporarily added $CefBinDir to PATH"
 
 # Calculate the build output directory within the target folder
-$BuildOutputDir = Join-Path $PSScriptRoot $CargoTargetDir $Profile "examples" # e.g., c:\GIT\petplay\submodules\cefpuppy\target\release\examples
+# Corrected Join-Path: Nest calls or use -ChildPath with an array if needed for multiple segments
+$BuildOutputDir = Join-Path -Path (Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath $CargoTargetDir) -ChildPath $Profile) -ChildPath "examples"
+# Example alternative using -ChildPath array (less common but works):
+# $BuildOutputDir = Join-Path -Path $PSScriptRoot -ChildPath @($CargoTargetDir, $Profile, "examples")
+Write-Host "Build output directory set to: $BuildOutputDir" # Added for verification
 
 # Resolve the final output directory path
 $FinalOutputFullPath = Join-Path $PSScriptRoot $FinalOutputDir # Resolve relative to script location
