@@ -37,7 +37,7 @@ fn send_frame_over_pipe(width: i32, height: i32, buffer: &[u8]) {
             Ok(pipe) => {
                 *conn_guard = Some(pipe);
             }
-            Err(e) => {
+            Err(_e) => {
                 //eprintln!("[Rust] Failed to connect to named pipe: {}", e);
                 return;
             }
