@@ -1,12 +1,12 @@
 use cef::{args::Args, rc::*, sandbox_info::SandboxInfo, *};
-use std::sync::{Arc, Mutex};
-use std::io::Write;
 use lazy_static::lazy_static;
-use named_pipe::PipeClient;
-use std::time::{Instant, Duration};
+use named_pipe::{PipeOptions, PipeServer};
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 lazy_static! {
-    static ref PIPE_CONN: Mutex<Option<PipeClient>> = Mutex::new(None);
+    static ref PIPE_CONN: Mutex<Option<PipeServer>> = Mutex::new(None);
 }
 
 static mut LAST_FPS_LOG: Option<Instant> = None;
@@ -33,12 +33,27 @@ fn log_fps() {
 fn send_frame_over_pipe(width: i32, height: i32, buffer: &[u8]) {
     let mut conn_guard = PIPE_CONN.lock().unwrap();
     if conn_guard.is_none() {
-        match PipeClient::connect(r"\\.\pipe\your-own-name") {
-            Ok(pipe) => {
-                *conn_guard = Some(pipe);
+        let pipe_name = r"\\.\pipe\your-own-name";
+        match PipeOptions::new(pipe_name)
+                .in_buffer(1024 * 1024) // 1 MB
+                .out_buffer(200 * 1024 * 1024) // 40 MB - Adjust as needed based on max frame size
+                .single() // Create a single server instance
+        {
+            Ok(connecting_server) => {
+                println!("[Rust] Pipe server created at {}. Waiting for client connection...", pipe_name);
+                match connecting_server.wait() {
+                    Ok(connected_server) => {
+                        println!("[Rust] Client connected to pipe server.");
+                        *conn_guard = Some(connected_server);
+                    }
+                    Err(e) => {
+                         eprintln!("[Rust] Failed to wait for client connection: {}", e);
+                         return;
+                    }
+                }
             }
-            Err(_e) => {
-                //eprintln!("[Rust] Failed to connect to named pipe: {}", e);
+            Err(e) => {
+                eprintln!("[Rust] Failed to create named pipe server options: {}", e);
                 return;
             }
         }
@@ -55,17 +70,34 @@ fn send_frame_over_pipe(width: i32, height: i32, buffer: &[u8]) {
         header.extend(&total_size.to_le_bytes());
         header.extend(&num_chunks.to_le_bytes());
         if let Err(e) = pipe.write_all(&header) {
-            eprintln!("[Rust] Failed to send header: {}", e);
+            eprintln!(
+                "[Rust] Failed to send header: {}. Client likely disconnected.",
+                e
+            );
             *conn_guard = None;
             return;
         }
         if let Err(e) = pipe.write_all(&chunk_size.to_le_bytes()) {
-            eprintln!("[Rust] Failed to send chunk size: {}", e);
+            eprintln!(
+                "[Rust] Failed to send chunk size: {}. Client likely disconnected.",
+                e
+            );
             *conn_guard = None;
             return;
         }
         if let Err(e) = pipe.write_all(buffer) {
-            eprintln!("[Rust] Failed to send frame data: {}", e);
+            eprintln!(
+                "[Rust] Failed to send frame data: {}. Client likely disconnected.",
+                e
+            );
+            *conn_guard = None;
+            return;
+        }
+        if let Err(e) = pipe.flush() {
+            eprintln!(
+                "[Rust] Failed to flush pipe: {}. Client likely disconnected.",
+                e
+            );
             *conn_guard = None;
             return;
         }
@@ -74,6 +106,7 @@ fn send_frame_over_pipe(width: i32, height: i32, buffer: &[u8]) {
 
 struct DemoApp {
     object: *mut RcImpl<cef_dll_sys::_cef_app_t, Self>,
+
     window: Arc<Mutex<Option<Window>>>,
 }
 
@@ -126,6 +159,7 @@ impl ImplApp for DemoApp {
 
 struct DemoBrowserProcessHandler {
     object: *mut RcImpl<cef_dll_sys::cef_browser_process_handler_t, Self>,
+
     window: Arc<Mutex<Option<Window>>>,
 }
 
@@ -172,27 +206,20 @@ impl ImplBrowserProcessHandler for DemoBrowserProcessHandler {
         self.object.cast()
     }
 
-    // The real lifespan of cef starts from `on_context_initialized`, so all the cef objects should be manipulated after that.
     fn on_context_initialized(&self) {
         println!("cef context intiialized");
 
-        // --- Windowless/Off-screen Rendering ---
         let mut window_info = WindowInfo::default();
         window_info.windowless_rendering_enabled = 1;
-        // Do NOT set parent_window or window handle for off-screen renderin
 
-        // Prepare the client (with your DemoRenderHandler etc)
         let mut client = DemoClient::new();
 
-        // Prepare browser settings
         let mut browser_settings = BrowserSettings::default();
-        browser_settings.windowless_frame_rate = 900000; // Set high FPS for off-screen rendering
+        browser_settings.windowless_frame_rate = 90000;
 
-        // Optionally, set up request context and extra_info if needed, else None
         let request_context: Option<&mut RequestContext> = None;
         let extra_info: Option<&mut DictionaryValue> = None;
 
-        // Create the browser in windowless mode
         let browser = browser_host_create_browser_sync(
             Some(&window_info),
             Some(&mut client),
@@ -207,8 +234,10 @@ impl ImplBrowserProcessHandler for DemoBrowserProcessHandler {
     }
 }
 
-use cef::{ImplBrowser, RenderHandler, WrapRenderHandler, ImplRenderHandler, PaintElementType, Rect};
-use cef::{DisplayHandler, WrapDisplayHandler, ImplDisplayHandler, LogSeverity}; // Added DisplayHandler related imports
+use cef::{DisplayHandler, ImplDisplayHandler, LogSeverity, WrapDisplayHandler};
+use cef::{
+    ImplBrowser, ImplRenderHandler, PaintElementType, Rect, RenderHandler, WrapRenderHandler,
+};
 
 #[derive(Clone)]
 struct DemoRenderHandler {
@@ -254,7 +283,6 @@ fn process_and_flip_buffer(width: i32, height: i32, buffer: &[u8]) -> Vec<u8> {
             let g = src_row[src_idx + 1];
             let r = src_row[src_idx + 2];
             let a = src_row[src_idx + 3];
-            // If black pixel (R=G=B=0), set alpha to 0
             let new_a = if r == 0 && g == 0 && b == 0 { 0 } else { a };
             dst_row[dst_idx] = b;
             dst_row[dst_idx + 1] = g;
@@ -270,16 +298,12 @@ impl ImplRenderHandler for DemoRenderHandler {
         self.object.cast()
     }
 
-    fn get_view_rect(
-        &self,
-        _browser: Option<&mut impl ImplBrowser>,
-        rect: Option<&mut Rect>,
-    ) {
+    fn get_view_rect(&self, _browser: Option<&mut impl ImplBrowser>, rect: Option<&mut Rect>) {
         if let Some(rect) = rect {
             rect.x = 0;
             rect.y = 0;
-            rect.width = 1200;
-            rect.height = 600;
+            rect.width = 1200 * 2;
+            rect.height = 600 * 2;
         }
     }
 
@@ -305,7 +329,6 @@ impl ImplRenderHandler for DemoRenderHandler {
     }
 }
 
-// +++ Add DemoDisplayHandler struct and implementations +++
 #[derive(Clone)]
 struct DemoDisplayHandler {
     object: *mut RcImpl<cef_dll_sys::_cef_display_handler_t, Self>,
@@ -352,11 +375,9 @@ impl ImplDisplayHandler for DemoDisplayHandler {
         } else if let Some(msg) = message {
             println!("[Browser Console] {}", msg);
         }
-        // Return 0 to allow the default handling, or 1 to suppress it.
         0
     }
 }
-// --- End of DemoDisplayHandler ---
 
 struct DemoClient(*mut RcImpl<cef_dll_sys::_cef_client_t, Self>);
 
@@ -401,34 +422,14 @@ impl ImplClient for DemoClient {
         Some(DemoRenderHandler::new())
     }
 
-    // +++ Add get_display_handler +++
     fn get_display_handler(&self) -> Option<DisplayHandler> {
         Some(DemoDisplayHandler::new())
     }
-
-    // --- Remove on_console_message from here ---
-    /*
-    fn on_console_message(
-        &self,
-        _browser: Option<&mut impl ImplBrowser>,
-        _level: LogSeverity,
-        message: Option<&CefString>,
-        source: Option<&CefString>,
-        line: ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int {
-        if let (Some(msg), Some(src)) = (message, source) {
-            println!("[Browser Console] [{}:{}] {}", src, line, msg);
-        } else if let Some(msg) = message {
-            println!("[Browser Console] {}", msg);
-        }
-        // Return 0 to allow the default handling, or 1 to suppress it.
-        0
-    }
-    */
 }
 
 struct _DemoWindowDelegate {
     base: *mut RcImpl<cef_dll_sys::_cef_window_delegate_t, Self>,
+
     browser_view: BrowserView,
 }
 
@@ -524,7 +525,6 @@ impl ImplWindowDelegate for _DemoWindowDelegate {
     }
 }
 
-// FIXME: Rewrite this demo based on cef/tests/cefsimple
 fn main() {
     #[cfg(target_os = "macos")]
     let _loader = {
@@ -559,7 +559,6 @@ fn main() {
         let process_type = CefString::from(&cmd.get_switch_value(Some(&switch)));
         println!("launch process {process_type}");
         assert!(ret >= 0, "cannot execute non-browser process");
-        // non-browser process does not initialize cef
         return;
     }
     let mut settings = Settings::default();
@@ -578,6 +577,5 @@ fn main() {
 
     run_message_loop();
 
-    // No window to check in windowless mode
     shutdown();
 }
