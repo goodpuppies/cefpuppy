@@ -10,10 +10,14 @@ function showUsage() {
   console.log("  --profile, -p                 Build profile (default: release)");
   console.log("  --cargoTargetDir, -c          Path to cargo target directory (default: target)");
   console.log("  --finalOutputDir, -f          Path for final output (default: ../../cef)");
+  console.log("  --skipPdb, -s                 Skip PDB files to reduce size (default: true)");
+  console.log("  --minLocales, -m              Only include en-US locale (default: true)");
+  console.log("  --includeDxCompiler, -d       Include dxcompiler.dll (default: false)");
+  console.log("  --useUpx, -u                  Compress binaries with UPX if available (default: true)");
   console.log("\nExample:");
   console.log("  deno run --allow-read --allow-write --allow-env --allow-run build.ts --example=cefsimple");
-  console.log("  deno run --allow-read --allow-write --allow-env --allow-run build.ts -e cefsimple -p debug");
-  console.log("  deno run --allow-read --allow-write --allow-env --allow-run build.ts -ExampleName cefsimple -Profile debug");
+  console.log("  deno run --allow-read --allow-write --allow-env --allow-run build.ts -e cefsimple -p debug -s false");
+  console.log("  deno run --allow-read --allow-write --allow-env --allow-run build.ts -ExampleName cefsimple -MinLocales false");
   Deno.exit(1);
 }
 
@@ -51,20 +55,38 @@ let exampleName: string | undefined = psArgs.ExampleName || psArgs.example || ps
 let profile: string = psArgs.Profile || psArgs.profile || psArgs.p || "release";
 let cargoTargetDir: string = psArgs.CargoTargetDir || psArgs.cargoTargetDir || psArgs.c || "target";
 let finalOutputDir: string = psArgs.FinalOutputDir || psArgs.finalOutputDir || psArgs.f || "../../cef";
+// New size optimization options
+let skipPdb: boolean = psArgs.SkipPdb || psArgs.skipPdb || psArgs.s ? 
+                         (psArgs.SkipPdb || psArgs.skipPdb || psArgs.s) === "true" : true;
+let minLocales: boolean = psArgs.MinLocales || psArgs.minLocales || psArgs.m ? 
+                            (psArgs.MinLocales || psArgs.minLocales || psArgs.m) === "true" : true;
+let includeDxCompiler: boolean = psArgs.IncludeDxCompiler || psArgs.includeDxCompiler || psArgs.d ? 
+                                  (psArgs.IncludeDxCompiler || psArgs.includeDxCompiler || psArgs.d) === "true" : true;
+let useUpx: boolean = psArgs.UseUpx || psArgs.useUpx || psArgs.u ? 
+                      (psArgs.UseUpx || psArgs.useUpx || psArgs.u) === "true" : true;
 
 // Parse command-line arguments with standard parser as fallback
 const parsedArgs = parseArgs(Deno.args, {
   string: ["example", "profile", "cargoTargetDir", "finalOutputDir"],
+  boolean: ["skipPdb", "minLocales", "includeDxCompiler", "useUpx"],
   default: {
     profile: "release",
     cargoTargetDir: "target",
-    finalOutputDir: "../../cef"
+    finalOutputDir: "../../cef",
+    skipPdb: true,
+    minLocales: true,
+    includeDxCompiler: false,
+    useUpx: false
   },
   alias: {
     e: "example",
     p: "profile",
     c: "cargoTargetDir",
-    f: "finalOutputDir"
+    f: "finalOutputDir",
+    s: "skipPdb",
+    m: "minLocales",
+    d: "includeDxCompiler",
+    u: "useUpx"
   }
 });
 
@@ -73,6 +95,10 @@ exampleName = exampleName || parsedArgs.example;
 profile = profile || parsedArgs.profile;
 cargoTargetDir = cargoTargetDir || parsedArgs.cargoTargetDir;
 finalOutputDir = finalOutputDir || parsedArgs.finalOutputDir;
+skipPdb = parsedArgs.skipPdb !== undefined ? parsedArgs.skipPdb : skipPdb;
+minLocales = parsedArgs.minLocales !== undefined ? parsedArgs.minLocales : minLocales;
+includeDxCompiler = parsedArgs.includeDxCompiler !== undefined ? parsedArgs.includeDxCompiler : includeDxCompiler;
+useUpx = parsedArgs.useUpx !== undefined ? parsedArgs.useUpx : useUpx;
 
 // Validate required arguments
 if (!exampleName) {
@@ -88,8 +114,9 @@ const example: string = exampleName as string;
 async function buildExample() {
   console.log(`Using example: ${example}`);
   console.log(`Using profile: ${profile}`);
+  console.log(`Size optimizations: skipPdb=${skipPdb}, minLocales=${minLocales}, includeDxCompiler=${includeDxCompiler}, useUpx=${useUpx}`);
 
-  // --- 1. Setup Environment and Paths ---
+  // --- 1. Setup Environment and Paths ---  
   
   console.log("Setting up environment...");
   
@@ -189,16 +216,16 @@ async function buildExample() {
     "chrome_100_percent.pak",
     "chrome_200_percent.pak",
     "icudtl.dat",
-    "dxcompiler.dll",
-    "dxil.dll",
     "libEGL.dll",
     "libGLESv2.dll",
     "vk_swiftshader_icd.json"
   ];
   
-  const dirsToCopy = [
-    "locales"
-  ];
+  // Only include dxcompiler.dll if explicitly requested
+  if (includeDxCompiler) {
+    filesToCopy.push("dxcompiler.dll");
+    filesToCopy.push("dxil.dll");
+  }
   
   // Ensure build output directory exists
   try {
@@ -218,26 +245,38 @@ async function buildExample() {
     }
   }
   
-  // Copy Directories
-  for (const dir of dirsToCopy) {
-    const sourceDir = path.join(cefBinDir, dir);
-    const destDir = path.join(buildOutputDir, dir);
+  // Copy Locales - with optimization if enabled
+  const localesDir = path.join(cefBinDir, "locales");
+  const destLocalesDir = path.join(buildOutputDir, "locales");
+  
+  try {
+    await Deno.stat(localesDir);
     
+    // Remove destination if it exists
     try {
-      await Deno.stat(sourceDir);
-      
-      // Remove destination if it exists
-      try {
-        await Deno.remove(destDir, { recursive: true });
-      } catch {
-        // Ignore if it doesn't exist
-      }
-      
-      // Copy directory
-      await fs.copy(sourceDir, destDir, { overwrite: true });
+      await Deno.remove(destLocalesDir, { recursive: true });
     } catch {
-      console.warn(`CEF source directory not found: ${sourceDir}`);
+      // Ignore if it doesn't exist
     }
+    
+    // Create the locales directory
+    await Deno.mkdir(destLocalesDir, { recursive: true });
+    
+    if (minLocales) {
+      // Only copy en-US.pak when minimizing
+      const enUsPakPath = path.join(localesDir, "en-US.pak");
+      try {
+        await Deno.stat(enUsPakPath);
+        await Deno.copyFile(enUsPakPath, path.join(destLocalesDir, "en-US.pak"));
+      } catch {
+        console.warn(`English locale file not found: ${enUsPakPath}`);
+      }
+    } else {
+      // Copy all locales
+      await fs.copy(localesDir, destLocalesDir, { overwrite: true });
+    }
+  } catch {
+    console.warn(`CEF locales directory not found: ${localesDir}`);
   }
   
   // Copy Manifest if exists (specific to cefsimple example)
@@ -262,7 +301,7 @@ async function buildExample() {
   try {
     await Deno.stat(finalOutputFullPath);
     
-    // Remove contents of directory - fixed to properly handle AsyncIterable
+    // Remove contents of directory
     for await (const entry of Deno.readDir(finalOutputFullPath)) {
       await Deno.remove(path.join(finalOutputFullPath, entry.name), { recursive: true });
     }
@@ -273,10 +312,15 @@ async function buildExample() {
   
   // Move the contents
   console.log("Moving files...");
-  // Fixed to properly handle AsyncIterable with for-await-of
   for await (const entry of Deno.readDir(buildOutputDir)) {
     const sourcePath = path.join(buildOutputDir, entry.name);
     const destPath = path.join(finalOutputFullPath, entry.name);
+    
+    // Skip PDB files if skipPdb is true
+    if (skipPdb && entry.name.endsWith('.pdb')) {
+      console.log(`Skipping debug symbols file: ${entry.name}`);
+      continue;
+    }
     
     // Use copy then delete instead of move for cross-device safety
     if (entry.isDirectory) {
@@ -285,6 +329,72 @@ async function buildExample() {
     } else {
       await Deno.copyFile(sourcePath, destPath);
       await Deno.remove(sourcePath);
+    }
+  }
+  
+  // --- 5. Apply UPX Compression if available ---
+  if (useUpx) {
+    console.log("Checking for UPX...");
+    let upxAvailable = false;
+    
+    try {
+      const upxCheck = new Deno.Command(Deno.build.os === "windows" ? "where" : "which", {
+        args: ["upx"],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      
+      const upxResult = await upxCheck.output();
+      upxAvailable = upxResult.success;
+    } catch {
+      // Command failed, UPX not available
+      upxAvailable = false;
+    }
+    
+    if (upxAvailable) {
+      console.log("UPX found, compressing executables...");
+
+      // Optionally compress chrome_elf.dll which is usually safe to compress
+      const libcefpath = path.join(finalOutputFullPath, "libcef.dll");
+      try {
+        await Deno.stat(libcefpath);
+
+        const upxCommand = new Deno.Command("upx", {
+          args: ["--best","--force", libcefpath],
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+
+        const upxResult = await upxCommand.output();
+        if (upxResult.success) {
+          console.log("Successfully compressed libcef.dll with UPX");
+        }
+      } catch {
+        // Ignore errors for optional compression
+      }
+      
+
+      
+      // Optionally compress chrome_elf.dll which is usually safe to compress
+      const chromeElfPath = path.join(finalOutputFullPath, "chrome_elf.dll");
+      try {
+        await Deno.stat(chromeElfPath);
+        
+        const upxCommand = new Deno.Command("upx", {
+          args: ["--best", chromeElfPath],
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        
+        const upxResult = await upxCommand.output();
+        if (upxResult.success) {
+          console.log("Successfully compressed chrome_elf.dll with UPX");
+        }
+      } catch {
+        // Ignore errors for optional compression
+      }
+    } else {
+      console.warn("UPX not found in PATH. Skipping compression. Install UPX for smaller builds.");
     }
   }
   
