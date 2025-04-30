@@ -134,7 +134,7 @@ foreach ($dir in $DirsToCopy) {
 
 # Copy Manifest if exists (specific to cefsimple example)
 if ($ExampleName -eq "cefsimple") {
-    $ManifestSource = Join-Path $PSScriptRoot "examples\cefsimple\win\cefsimple.exe.manifest" # Relative to script location
+    $ManifestSource = Join-Path $PSScriptRoot "cef\examples\cefsimple\win\cefsimple.exe.manifest" # Relative to script location
     if (Test-Path $ManifestSource) {
         # Write-Host "Copying manifest..." # Optional: reduce verbosity
         Copy-Item -Path $ManifestSource -Destination (Join-Path $BuildOutputDir "cefsimple.exe.manifest") -Force

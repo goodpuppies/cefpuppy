@@ -4,36 +4,40 @@ use named_pipe::{PipeOptions, PipeServer};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 lazy_static! {
     static ref PIPE_CONN: Mutex<Option<PipeServer>> = Mutex::new(None);
 }
 
-static mut LAST_FPS_LOG: Option<Instant> = None;
-static mut FRAME_COUNT: u32 = 0;
+
+
+lazy_static! {
+    static ref LAST_FPS_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+}
+static FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 
 fn log_fps() {
-    unsafe {
-        let now = Instant::now();
-        if let Some(last) = LAST_FPS_LOG {
-            FRAME_COUNT += 1;
-            let elapsed = now.duration_since(last);
-            if elapsed >= Duration::from_secs(1) {
-                println!("[Rust] FPS: {}", FRAME_COUNT);
-                FRAME_COUNT = 0;
-                LAST_FPS_LOG = Some(now);
-            }
-        } else {
-            LAST_FPS_LOG = Some(now);
-            FRAME_COUNT = 1;
+    let now = Instant::now();
+    let mut last_log = LAST_FPS_LOG.lock().unwrap();
+    if let Some(last) = *last_log {
+        FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+        let elapsed = now.duration_since(last);
+        if elapsed >= Duration::from_secs(1) {
+            println!("[Rust] FPS: {}", FRAME_COUNT.load(Ordering::Relaxed));
+            FRAME_COUNT.store(0, Ordering::Relaxed);
+            *last_log = Some(now);
         }
+    } else {
+        *last_log = Some(now);
+        FRAME_COUNT.store(1, Ordering::Relaxed);
     }
 }
 
 fn send_frame_over_pipe(width: i32, height: i32, buffer: &[u8]) {
     let mut conn_guard = PIPE_CONN.lock().unwrap();
     if conn_guard.is_none() {
-        let pipe_name = r"\\.\pipe\your-own-name";
+        let pipe_name = r"\\.\pipe\petplay-webxr";
         match PipeOptions::new(pipe_name)
                 .in_buffer(1024 * 1024) // 1 MB
                 .out_buffer(200 * 1024 * 1024) // 40 MB - Adjust as needed based on max frame size
